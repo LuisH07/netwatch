@@ -76,6 +76,8 @@ curl -sL https://raw.githubusercontent.com/LuisH07/netwatch/main/install.sh | ba
 
 ```
 
+> **Nota:** Este método exige que o terminal esteja utilizando o interpretador `bash` para processar corretamente o fluxo recebido via pipe.
+
 #### Opção 2: Instalação via Código-Fonte (Desenvolvimento)
 
 Ideal se você clonou o projeto para testar modificações. O script detectará a presença do arquivo `go.mod` e o compilador Go local para gerar o build:
