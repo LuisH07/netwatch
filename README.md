@@ -64,20 +64,30 @@ Projetado para rodar nativamente em distros Linux que utilizam o **NetworkManage
 - **Linux** com **NetworkManager** ativo e D-Bus.
 - Opcional (para desenvolvimento/compilação local): **Go** (versão 1.21+) e **Git**.
 
-### Instalação Rápida via Script Inteligente
-Clone o repositório e execute o script de instalação automática. Ele detectará se o ambiente possui o Go para compilação local ou baixará o binário otimizado diretamente das *Releases* do GitHub, instalando-o globalmente em `/usr/local/bin`:
+### Método de Instalação Inteligente (`install.sh`)
+
+O script de instalação do NetWatch possui comportamento adaptativo automático: ele detecta se você está executando dentro de um repositório clonado com o Go instalado (compilando direto do código-fonte) ou se está rodando em um ambiente limpo (baixando o binário otimizado da última *Release* do GitHub).
+
+#### Opção 1: Instalação Rápida Direta (Sem Clonar o Repositório)
+Ideal para uso imediato em qualquer máquina Linux. Baixa o script e executa a instalação do binário oficial globalmente em uma única linha:
 
 ```bash
-git clone https://github.com/LuisH07/netwatch.git
-cd netwatch
-chmod +x install.sh
-./install.sh
+curl -sL https://raw.githubusercontent.com/LuisH07/netwatch/main/install.sh | bash
 
 ```
 
-Após a execução, o comando `netwatch` estará disponível globalmente em qualquer diretório do seu terminal.
+#### Opção 2: Instalação via Código-Fonte (Desenvolvimento)
 
----
+Ideal se você clonou o projeto para testar modificações. O script detectará a presença do arquivo `go.mod` e o compilador Go local para gerar o build:
+
+```bash
+git clone [https://github.com/LuisH07/netwatch.git](https://github.com/LuisH07/netwatch.git)
+cd netwatch
+chmod +x install.sh
+./install.sh
+```
+
+Após a conclusão por qualquer um dos métodos, o comando `netwatch` estará disponível globalmente em `/usr/local/bin` para uso em qualquer diretório do terminal.
 
 ## Mapeamento de Comandos
 
