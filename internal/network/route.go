@@ -18,28 +18,28 @@ type Route struct {
 }
 
 // GetDefaultRoute consulta a tabela de roteamento do kernel via Netlink 
-// em busca da rota padrão (destino 0.0.0.0/0) e retorna o IP do gateway e a interface associada.
+// utilizando RouteGet para delegar a escolha da rota padrão ao kernel.
 func GetDefaultRoute() (Route, error) {
-	// Lista apenas rotas IPv4
-	routes, err := netlink.RouteList(nil, netlink.FAMILY_V4)
+	// Pergunta ao kernel qual rota ele usaria para alcançar um IP público de referência (1.1.1.1).
+	// Isso resolve automaticamente métricas, tabelas de roteamento e políticas do sistema.
+	routes, err := netlink.RouteGet(net.ParseIP("1.1.1.1"))
+	if err != nil || len(routes) == 0 {
+		return Route{}, fmt.Errorf("falha ao determinar rota padrão via netlink: %w", err)
+	}
+
+	route := routes[0]
+	if route.Gw == nil {
+		return Route{}, ErrNoDefaultRoute
+	}
+
+	// Obtém a interface associada ao índice retornado pelo kernel na rota
+	link, err := netlink.LinkByIndex(route.LinkIndex)
 	if err != nil {
-		return Route{}, fmt.Errorf("falha ao listar rotas via netlink: %w", err)
+		return Route{}, fmt.Errorf("falha ao identificar a interface de rede pelo índice %d: %w", route.LinkIndex, err)
 	}
 
-	for _, route := range routes {
-		// A rota padrão no netlink tem o Dst (destino) nulo e um Gw (gateway) definido
-		if route.Dst == nil && route.Gw != nil {
-			link, err := netlink.LinkByIndex(route.LinkIndex)
-			if err != nil {
-				return Route{}, fmt.Errorf("falha ao identificar a interface de rede pelo índice %d: %w", route.LinkIndex, err)
-			}
-
-			return Route{
-				Gateway:   route.Gw,
-				Interface: link.Attrs().Name,
-			}, nil
-		}
-	}
-
-	return Route{}, ErrNoDefaultRoute
+	return Route{
+		Gateway:   route.Gw,
+		Interface: link.Attrs().Name,
+	}, nil
 }

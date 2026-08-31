@@ -1,0 +1,36 @@
+name: Release Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    name: Build and Release NetWatch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build for Linux AMD64 and ARM64
+        run: |
+          mkdir -p dist
+          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/netwatch-linux-amd64 .
+          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o dist/netwatch-linux-arm64 .
+
+      - name: Publish Release with Artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/netwatch-linux-amd64
+            dist/netwatch-linux-arm64
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -7,6 +7,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/vishvananda/netlink v1.1.0
 	golang.org/x/net v0.58.0
+	golang.org/x/term v0.45.0
 )
 
 require (

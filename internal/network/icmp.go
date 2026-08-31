@@ -2,9 +2,10 @@ package network
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"net"
-	"os"
 	"time"
 
 	"golang.org/x/net/icmp"
@@ -17,8 +18,16 @@ type PingResult struct {
 	TTL     int
 }
 
+// generateID gera um ID pseudo-aleatório seguro para o identificador do Echo ICMP,
+// prevenindo colisões e race conditions em chamadas paralelas.
+func generateID() uint16 {
+	var b [2]byte
+	_, _ = rand.Read(b[:])
+	return binary.BigEndian.Uint16(b[:])
+}
+
 // Ping envia um ICMP Echo Request para o host especificado e aguarda a resposta.
-// Ele respeita o ciclo de vida do context.Context para evitar travamentos (timeouts).
+// Respeita rigorosamente o ciclo de vida do context.Context (tanto deadlines quanto cancelamentos).
 func Ping(ctx context.Context, host string) (PingResult, error) {
 	// Resolve o host (suporta tanto IP direto quanto domínio)
 	ipAddr, err := net.ResolveIPAddr("ip4", host)
@@ -33,18 +42,22 @@ func Ping(ctx context.Context, host string) (PingResult, error) {
 	}
 	defer conn.Close()
 
-	// Aplica o timeout do contexto no socket de rede
+	// Configura o deadline base se o contexto possuir um
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
 	}
+
+	// Gera ID único para esta chamada específica (evita race conditions)
+	icmpID := generateID()
+	icmpSeq := 1
 
 	// Constrói a mensagem Echo Request
 	msg := icmp.Message{
 		Type: ipv4.ICMPTypeEcho,
 		Code: 0,
 		Body: &icmp.Echo{
-			ID:   os.Getpid() & 0xffff,
-			Seq:  1,
+			ID:   int(icmpID),
+			Seq:  icmpSeq,
 			Data: []byte("netwatch-ping"),
 		},
 	}
@@ -55,36 +68,79 @@ func Ping(ctx context.Context, host string) (PingResult, error) {
 
 	start := time.Now()
 
-	// Envia o pacote (usando UDPAddr devido ao tipo de socket "udp4")
+	// Envia o pacote
 	_, err = conn.WriteTo(msgBytes, &net.UDPAddr{IP: ipAddr.IP})
 	if err != nil {
 		return PingResult{}, fmt.Errorf("falha ao enviar pacote ICMP: %w", err)
 	}
 
-	// Aguarda e lê a resposta
+	// Canal para gerenciar o término assíncrono da leitura e respeitar contextos com cancelamento sem deadline
+	type readResult struct {
+		n   int
+		err error
+	}
+
 	reply := make([]byte, 1500)
-	n, _, err := conn.ReadFrom(reply)
-	if err != nil {
-		return PingResult{}, fmt.Errorf("falha ao receber resposta ICMP: %w", err)
-	}
+	readChan := make(chan readResult, 1)
 
-	latency := time.Since(start)
+	go func() {
+		n, _, readErr := conn.ReadFrom(reply)
+		readChan <- readResult{n: n, err: readErr}
+	}()
 
-	// Faz o parse da mensagem de resposta
-	rm, err := icmp.ParseMessage(ipv4.ICMPTypeEchoReply.Protocol(), reply[:n])
-	if err != nil {
-		return PingResult{}, fmt.Errorf("falha ao decodificar a resposta ICMP: %w", err)
-	}
+	// Loop de escuta: descarta pacotes espúrios ou de outros IDs até encontrar o nosso ou o contexto estourar
+	for {
+		if deadline, ok := ctx.Deadline(); ok {
+			_ = conn.SetDeadline(deadline)
+		}
 
-	switch rm.Type {
-	case ipv4.ICMPTypeEchoReply:
-		// Em unprivileged pings, a extração do TTL real exigiria chamadas sys/raw sockets de baixo nível.
-		// Para o escopo funcional, a latência é a métrica principal.
-		return PingResult{
-			Latency: latency,
-			TTL:     0,
-		}, nil
-	default:
-		return PingResult{}, fmt.Errorf("pacote ICMP inesperado recebido: %v", rm.Type)
+		select {
+		case <-ctx.Done():
+			return PingResult{}, fmt.Errorf("ping cancelado ou expirado: %w", ctx.Err())
+		case res := <-readChan:
+			if res.err != nil {
+				return PingResult{}, fmt.Errorf("falha ao receber resposta ICMP: %w", res.err)
+			}
+
+			latency := time.Since(start)
+
+			// Faz o parse da mensagem recebida
+			rm, err := icmp.ParseMessage(ipv4.ICMPTypeEchoReply.Protocol(), reply[:res.n])
+			if err != nil {
+				// Se recebermos um pacote malformado ou ruído de rede, continuamos ouvindo se houver tempo
+				go func() {
+					n, _, readErr := conn.ReadFrom(reply)
+					readChan <- readResult{n: n, err: readErr}
+				}()
+				continue
+			}
+
+			switch rm.Type {
+			case ipv4.ICMPTypeEchoReply:
+				echo, ok := rm.Body.(*icmp.Echo)
+				// Valida se o ID e a Sequência correspondem exatamente à nossa requisição
+				if !ok || echo.ID != int(icmpID) || echo.Seq != icmpSeq {
+					// Pacote ICMP de outro processo/chamada — continua ouvindo
+					go func() {
+						n, _, readErr := conn.ReadFrom(reply)
+						readChan <- readResult{n: n, err: readErr}
+					}()
+					continue
+				}
+
+				return PingResult{
+					Latency: latency,
+					TTL:     0,
+				}, nil
+
+			default:
+				// Outros tipos de pacotes ICMP (ex: Destination Unreachable) podem ser tratados ou ignorados no loop
+				go func() {
+					n, _, readErr := conn.ReadFrom(reply)
+					readChan <- readResult{n: n, err: readErr}
+				}()
+				continue
+			}
+		}
 	}
 }
