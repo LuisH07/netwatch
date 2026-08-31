@@ -91,6 +91,26 @@ chmod +x install.sh
 
 Após a conclusão por qualquer um dos métodos, o comando `netwatch` estará disponível globalmente em `/usr/local/bin` para uso em qualquer diretório do terminal.
 
+## Autocompletar (Shell Completion)
+
+Para habilitar o preenchimento automático de comandos com a tecla `Tab` no seu terminal, adicione a configuração correspondente ao seu shell:
+
+### Para Bash
+
+```bash
+echo "source <(netwatch completion bash)" >> ~/.bashrc
+source ~/.bashrc
+
+```
+
+### Para Zsh
+
+```bash
+echo "source <(netwatch completion zsh)" >> ~/.zshrc
+source ~/.zshrc
+
+```
+
 ## Mapeamento de Comandos
 
 Abaixo estão listados todos os comandos suportados pelo NetWatch.
