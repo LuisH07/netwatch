@@ -27,7 +27,7 @@ else
         x86_64)  BINARY_ARCH="amd64" ;;
         aarch64) BINARY_ARCH="arm64" ;;
         *) log_error "Arquitetura não suportada: ${ARCH}" ;;
-    es
+    esac
 
     DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/${BINARY_NAME}-linux-${BINARY_ARCH}"
 
