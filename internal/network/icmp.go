@@ -2,8 +2,6 @@ package network
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/binary"
 	"fmt"
 	"net"
 	"time"
@@ -18,12 +16,72 @@ type PingResult struct {
 	TTL     int
 }
 
-// generateID gera um ID pseudo-aleatório seguro para o identificador do Echo ICMP,
-// prevenindo colisões e race conditions em chamadas paralelas.
-func generateID() uint16 {
-	var b [2]byte
-	_, _ = rand.Read(b[:])
-	return binary.BigEndian.Uint16(b[:])
+// pingConn abstrai o subconjunto do socket ICMP usado por ping, permitindo injetar
+// uma implementação fake em testes sem depender de um socket ICMP real (privilegiado
+// ou não) disponível no ambiente de execução.
+type pingConn interface {
+	WriteTo(b []byte, addr net.Addr) (int, error)
+	// ReadPacket bloqueia até receber um pacote (ou até o socket ser fechado/expirar),
+	// retornando os bytes brutos recebidos e o TTL do cabeçalho IP, quando disponível.
+	ReadPacket() (data []byte, ttl int, err error)
+	SetDeadline(t time.Time) error
+	Close() error
+	// LocalPort retorna a porta local do socket, usada como identificador do Echo ICMP
+	// (ver comentário em icmpConn.LocalPort na implementação real).
+	LocalPort() int
+}
+
+// icmpConn é a implementação real de pingConn sobre um socket ICMP "udp4" (não privilegiado).
+type icmpConn struct {
+	conn *icmp.PacketConn
+	p4   *ipv4.PacketConn
+}
+
+func newICMPConn() (*icmpConn, error) {
+	// Usamos "udp4" para unprivileged ICMP ping (não exige permissão de root)
+	conn, err := icmp.ListenPacket("udp4", "0.0.0.0")
+	if err != nil {
+		return nil, fmt.Errorf("falha ao abrir socket ICMP (verifique net.ipv4.ping_group_range): %w", err)
+	}
+
+	// Habilita o recebimento do TTL do cabeçalho IP via ancillary data (IP_RECVTTL),
+	// disponível mesmo em sockets ICMP não privilegiados no Linux.
+	p4 := conn.IPv4PacketConn()
+	if p4 != nil {
+		_ = p4.SetControlMessage(ipv4.FlagTTL, true)
+	}
+
+	return &icmpConn{conn: conn, p4: p4}, nil
+}
+
+func (c *icmpConn) WriteTo(b []byte, addr net.Addr) (int, error) { return c.conn.WriteTo(b, addr) }
+func (c *icmpConn) SetDeadline(t time.Time) error                { return c.conn.SetDeadline(t) }
+func (c *icmpConn) Close() error                                 { return c.conn.Close() }
+
+// LocalPort retorna a porta local do socket. Em sockets ICMP não privilegiados ("ping
+// sockets") do Linux, o kernel reescreve o campo ID do Echo Request para a porta local do
+// socket antes de enviar (usada para demultiplexar a resposta de volta a este processo) —
+// por isso é essa porta, e não um ID gerado pelo cliente, que deve ser usada para validar
+// a resposta recebida.
+func (c *icmpConn) LocalPort() int {
+	if udpAddr, ok := c.conn.LocalAddr().(*net.UDPAddr); ok {
+		return udpAddr.Port
+	}
+	return 0
+}
+
+func (c *icmpConn) ReadPacket() ([]byte, int, error) {
+	buf := make([]byte, 1500)
+	if c.p4 != nil {
+		n, cm, _, err := c.p4.ReadFrom(buf)
+		ttl := 0
+		if cm != nil {
+			ttl = cm.TTL
+		}
+		return buf[:n], ttl, err
+	}
+	n, _, err := c.conn.ReadFrom(buf)
+	return buf[:n], 0, err
 }
 
 // Ping envia um ICMP Echo Request para o host especificado e aguarda a resposta.
@@ -35,11 +93,17 @@ func Ping(ctx context.Context, host string) (PingResult, error) {
 		return PingResult{}, fmt.Errorf("falha ao resolver host: %w", err)
 	}
 
-	// Usamos "udp4" para unprivileged ICMP ping (não exige permissão de root)
-	conn, err := icmp.ListenPacket("udp4", "0.0.0.0")
+	conn, err := newICMPConn()
 	if err != nil {
-		return PingResult{}, fmt.Errorf("falha ao abrir socket ICMP (verifique net.ipv4.ping_group_range): %w", err)
+		return PingResult{}, err
 	}
+
+	return ping(ctx, conn, &net.UDPAddr{IP: ipAddr.IP})
+}
+
+// ping contém a lógica de envio/escuta do Echo ICMP, desacoplada da criação do socket real
+// para poder ser testada com uma pingConn fake.
+func ping(ctx context.Context, conn pingConn, dst net.Addr) (PingResult, error) {
 	defer conn.Close()
 
 	// Configura o deadline base se o contexto possuir um
@@ -47,8 +111,7 @@ func Ping(ctx context.Context, host string) (PingResult, error) {
 		_ = conn.SetDeadline(deadline)
 	}
 
-	// Gera ID único para esta chamada específica (evita race conditions)
-	icmpID := generateID()
+	icmpID := conn.LocalPort()
 	icmpSeq := 1
 
 	// Constrói a mensagem Echo Request
@@ -56,7 +119,7 @@ func Ping(ctx context.Context, host string) (PingResult, error) {
 		Type: ipv4.ICMPTypeEcho,
 		Code: 0,
 		Body: &icmp.Echo{
-			ID:   int(icmpID),
+			ID:   icmpID,
 			Seq:  icmpSeq,
 			Data: []byte("netwatch-ping"),
 		},
@@ -69,23 +132,37 @@ func Ping(ctx context.Context, host string) (PingResult, error) {
 	start := time.Now()
 
 	// Envia o pacote
-	_, err = conn.WriteTo(msgBytes, &net.UDPAddr{IP: ipAddr.IP})
+	_, err = conn.WriteTo(msgBytes, dst)
 	if err != nil {
 		return PingResult{}, fmt.Errorf("falha ao enviar pacote ICMP: %w", err)
 	}
 
 	// Canal para gerenciar o término assíncrono da leitura e respeitar contextos com cancelamento sem deadline
 	type readResult struct {
-		n   int
-		err error
+		data []byte
+		ttl  int
+		err  error
 	}
 
-	reply := make([]byte, 1500)
-	readChan := make(chan readResult, 1)
+	readChan := make(chan readResult)
 
+	// Uma única goroutine leitora de longa duração: evita disparar uma goroutine nova
+	// por pacote espúrio, o que poderia vazar leituras bloqueadas em ReadPacket indefinidamente.
+	// Ela encerra sozinha quando ReadPacket retorna erro (ex.: após conn.Close() no defer acima)
+	// ou quando o contexto expira/é cancelado.
 	go func() {
-		n, _, readErr := conn.ReadFrom(reply)
-		readChan <- readResult{n: n, err: readErr}
+		for {
+			data, ttl, readErr := conn.ReadPacket()
+
+			select {
+			case readChan <- readResult{data: data, ttl: ttl, err: readErr}:
+				if readErr != nil {
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
 	}()
 
 	// Loop de escuta: descarta pacotes espúrios ou de outros IDs até encontrar o nosso ou o contexto estourar
@@ -105,13 +182,9 @@ func Ping(ctx context.Context, host string) (PingResult, error) {
 			latency := time.Since(start)
 
 			// Faz o parse da mensagem recebida
-			rm, err := icmp.ParseMessage(ipv4.ICMPTypeEchoReply.Protocol(), reply[:res.n])
+			rm, err := icmp.ParseMessage(ipv4.ICMPTypeEchoReply.Protocol(), res.data)
 			if err != nil {
 				// Se recebermos um pacote malformado ou ruído de rede, continuamos ouvindo se houver tempo
-				go func() {
-					n, _, readErr := conn.ReadFrom(reply)
-					readChan <- readResult{n: n, err: readErr}
-				}()
 				continue
 			}
 
@@ -119,26 +192,18 @@ func Ping(ctx context.Context, host string) (PingResult, error) {
 			case ipv4.ICMPTypeEchoReply:
 				echo, ok := rm.Body.(*icmp.Echo)
 				// Valida se o ID e a Sequência correspondem exatamente à nossa requisição
-				if !ok || echo.ID != int(icmpID) || echo.Seq != icmpSeq {
+				if !ok || echo.ID != icmpID || echo.Seq != icmpSeq {
 					// Pacote ICMP de outro processo/chamada — continua ouvindo
-					go func() {
-						n, _, readErr := conn.ReadFrom(reply)
-						readChan <- readResult{n: n, err: readErr}
-					}()
 					continue
 				}
 
 				return PingResult{
 					Latency: latency,
-					TTL:     0,
+					TTL:     res.ttl,
 				}, nil
 
 			default:
 				// Outros tipos de pacotes ICMP (ex: Destination Unreachable) podem ser tratados ou ignorados no loop
-				go func() {
-					n, _, readErr := conn.ReadFrom(reply)
-					readChan <- readResult{n: n, err: readErr}
-				}()
 				continue
 			}
 		}

@@ -1,12 +1,14 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
-	"netwatch/internal/network"
-	"time"
 
 	"github.com/spf13/cobra"
+)
+
+var (
+	dnsTarget string
+	tcpTarget string
 )
 
 // checkCmd representa o comando "check"
@@ -15,101 +17,15 @@ var checkCmd = &cobra.Command{
 	Short: "Executa diagnóstico completo da rede",
 	Long:  `Verifica interface de rede, gateway padrão, latência ICMP, resolução DNS e conectividade TCP.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Println("NETWATCH CHECK")
-		fmt.Println()
+		report := runDiagnostics()
+		fmt.Print(renderCheckReport(report))
 
-		// 1. Interface
-		fmt.Println("Interface")
-		iface, err := network.GetDefaultInterface()
-		if err != nil {
-			fmt.Printf("  x Erro: %v\n\n", err)
+		if report.InterfaceErr != nil || report.RouteErr != nil {
 			return &exitError{code: 2} // 2 = erro de execução/configuração
 		}
-		fmt.Printf("  ✓ %s\n", iface.Name)
-		// Como GetDefaultInterface já filtra por FlagUp, a interface ativa é garantidamente UP.
-		fmt.Printf("  ✓ UP\n")
-		fmt.Printf("  ✓ IPv4 %s\n\n", iface.IPv4.String())
-
-		// 2. Routing
-		fmt.Println("Routing")
-		route, err := network.GetDefaultRoute()
-		if err != nil {
-			fmt.Printf("  x Erro: %v\n\n", err)
-			return &exitError{code: 2}
-		}
-		fmt.Printf("  ✓ Gateway %s\n\n", route.Gateway.String())
-
-		// 3. Connectivity (Paralelo)
-		fmt.Println("Connectivity")
-
-		// Contexto com timeout de 2 segundos para evitar travamentos
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-
-		// Estruturas de resultado isoladas para evitar data races lógicas e garantir robustez
-		type checkResult struct {
-			latency time.Duration
-			err     error
-		}
-
-		icmpChan := make(chan checkResult, 1)
-		dnsChan := make(chan checkResult, 1)
-		tcpChan := make(chan checkResult, 1)
-
-		// Goroutine 1: ICMP
-		go func() {
-			res, err := network.Ping(ctx, route.Gateway.String())
-			icmpChan <- checkResult{latency: res.Latency, err: err}
-		}()
-
-		// Goroutine 2: DNS
-		go func() {
-			res, err := network.Resolve(ctx, "google.com")
-			dnsChan <- checkResult{latency: res.Latency, err: err}
-		}()
-
-		// Goroutine 3: TCP
-		go func() {
-			latency, err := network.CheckTCP(ctx, "1.1.1.1:443")
-			tcpChan <- checkResult{latency: latency, err: err}
-		}()
-
-		// Coleta os resultados dos canais
-		icmpRes := <-icmpChan
-		dnsRes := <-dnsChan
-		tcpRes := <-tcpChan
-
-		hasNetError := false
-
-		if icmpRes.err != nil {
-			fmt.Printf("  x ICMP       Erro: %v\n", icmpRes.err)
-			hasNetError = true
-		} else {
-			fmt.Printf("  ✓ ICMP       %.1f ms\n", float64(icmpRes.latency.Microseconds())/1000)
-		}
-
-		if dnsRes.err != nil {
-			fmt.Printf("  x DNS        Erro: %v\n", dnsRes.err)
-			hasNetError = true
-		} else {
-			fmt.Printf("  ✓ DNS        %.1f ms\n", float64(dnsRes.latency.Microseconds())/1000)
-		}
-
-		if tcpRes.err != nil {
-			fmt.Printf("  x TCP/443    Erro: %v\n", tcpRes.err)
-			hasNetError = true
-		} else {
-			fmt.Printf("  ✓ TCP/443    %.1f ms\n", float64(tcpRes.latency.Microseconds())/1000)
-		}
-
-		fmt.Println()
-
-		if hasNetError {
-			fmt.Println("Network: DEGRADED / OFFLINE")
+		if report.Degraded {
 			return &exitError{code: 1} // 1 = problema de rede
 		}
-
-		fmt.Println("Network: HEALTHY")
 		return nil
 	},
 }
@@ -125,5 +41,7 @@ func (e *exitError) Error() string {
 }
 
 func init() {
+	checkCmd.Flags().StringVar(&dnsTarget, "dns-target", "google.com", "Host usado para testar a resolução DNS")
+	checkCmd.Flags().StringVar(&tcpTarget, "tcp-target", "9.9.9.9:443", "Endereço host:porta usado para testar conectividade TCP")
 	rootCmd.AddCommand(checkCmd)
 }

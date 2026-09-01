@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"syscall"
 	"time"
@@ -9,6 +10,16 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 	"netwatch/internal/wifi"
+)
+
+// Pontos de injeção substituíveis em testes, para exercitar os comandos "wifi" com um
+// wifi.Manager fake e sem depender de um terminal real para leitura de senha.
+var (
+	newManager   = func() (wifi.Manager, error) { return wifi.NewNetworkManager() }
+	readPassword = func() (string, error) {
+		b, err := term.ReadPassword(int(syscall.Stdin))
+		return string(b), err
+	}
 )
 
 var wifiCmd = &cobra.Command{
@@ -19,7 +30,7 @@ var wifiCmd = &cobra.Command{
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		mgr, err := wifi.NewNetworkManager()
+		mgr, err := newManager()
 		if err != nil {
 			fmt.Printf("Erro ao inicializar NetworkManager: %v\n", err)
 			return &exitError{code: 2}
@@ -28,7 +39,12 @@ var wifiCmd = &cobra.Command{
 		current, err := mgr.Current(ctx)
 		if err != nil {
 			// Distingue erro real de D-Bus de simplesmente não estar conectado a nenhuma rede
-			fmt.Println("Nenhuma rede Wi-Fi ativa no momento.")
+			if errors.Is(err, wifi.ErrNoActiveConnection) {
+				fmt.Println("Nenhuma rede Wi-Fi ativa no momento.")
+			} else {
+				fmt.Printf("Erro ao consultar conexão Wi-Fi: %v\n", err)
+				return &exitError{code: 2}
+			}
 		} else if current.SSID != "" {
 			fmt.Printf("Conectado a: %s (Interface: %s)\n", current.SSID, current.Interface)
 		}
@@ -45,7 +61,7 @@ var wifiListCmd = &cobra.Command{
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		mgr, err := wifi.NewNetworkManager()
+		mgr, err := newManager()
 		if err != nil {
 			fmt.Printf("Erro ao inicializar NetworkManager: %v\n", err)
 			return &exitError{code: 2}
@@ -80,7 +96,7 @@ var wifiConnectCmd = &cobra.Command{
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		mgr, err := wifi.NewNetworkManager()
+		mgr, err := newManager()
 		if err != nil {
 			fmt.Printf("Erro ao inicializar NetworkManager: %v\n", err)
 			return &exitError{code: 2}
@@ -101,13 +117,13 @@ var wifiConnectCmd = &cobra.Command{
 		var password string
 		if isSecured {
 			fmt.Printf("A rede '%s' é protegida. Digite a senha: ", ssid)
-			bytePassword, err := term.ReadPassword(int(syscall.Stdin))
+			pw, err := readPassword()
 			fmt.Println() // Quebra de linha após o input oculto
 			if err != nil {
 				fmt.Printf("Erro ao ler senha: %v\n", err)
 				return &exitError{code: 1}
 			}
-			password = string(bytePassword)
+			password = pw
 		}
 
 		fmt.Printf("Conectando a %s...\n", ssid)
@@ -128,7 +144,7 @@ var wifiDisconnectCmd = &cobra.Command{
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		mgr, err := wifi.NewNetworkManager()
+		mgr, err := newManager()
 		if err != nil {
 			fmt.Printf("Erro ao inicializar NetworkManager: %v\n", err)
 			return &exitError{code: 2}

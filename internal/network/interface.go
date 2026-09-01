@@ -11,6 +11,16 @@ import (
 // ErrNoActiveInterface indica que nenhuma interface apta foi encontrada no sistema.
 var ErrNoActiveInterface = errors.New("nenhuma interface de rede ativa com IPv4 encontrada")
 
+// Pontos de injeção substituíveis em testes, para exercitar a lógica de seleção de
+// interface/rota sem depender de chamadas reais ao netlink ou ao SO (que exigiriam
+// privilégios ou manipulação de netns).
+var (
+	netlinkRouteGet     = netlink.RouteGet
+	netlinkLinkByIndex  = netlink.LinkByIndex
+	netInterfaceByIndex = net.InterfaceByIndex
+	ifaceAddrs          = func(iface *net.Interface) ([]net.Addr, error) { return iface.Addrs() }
+)
+
 // InterfaceInfo contém os dados essenciais de uma interface de rede.
 type InterfaceInfo struct {
 	Name string
@@ -23,7 +33,7 @@ type InterfaceInfo struct {
 // consultando diretamente a rota padrão do kernel via Netlink.
 func GetDefaultInterface() (InterfaceInfo, error) {
 	// Consulta a rota padrão do kernel para o IP de destino genérico (ex: 1.1.1.1)
-	routes, err := netlink.RouteGet(net.ParseIP("1.1.1.1"))
+	routes, err := netlinkRouteGet(net.ParseIP("1.1.1.1"))
 	if err != nil || len(routes) == 0 {
 		return InterfaceInfo{}, fmt.Errorf("falha ao determinar rota padrão via netlink: %w", err)
 	}
@@ -35,7 +45,7 @@ func GetDefaultInterface() (InterfaceInfo, error) {
 	}
 
 	// Obtém a interface de rede física/virtual associada àquele índice de link
-	iface, err := net.InterfaceByIndex(route.LinkIndex)
+	iface, err := netInterfaceByIndex(route.LinkIndex)
 	if err != nil {
 		return InterfaceInfo{}, fmt.Errorf("falha ao buscar interface por índice %d: %w", route.LinkIndex, err)
 	}
@@ -44,7 +54,7 @@ func GetDefaultInterface() (InterfaceInfo, error) {
 	isUp := iface.Flags&net.FlagUp != 0
 
 	// Coleta os endereços IP associados à interface correta
-	addrs, err := iface.Addrs()
+	addrs, err := ifaceAddrs(iface)
 	if err != nil {
 		return InterfaceInfo{}, fmt.Errorf("falha ao ler endereços da interface %s: %w", iface.Name, err)
 	}
