@@ -181,6 +181,13 @@ func newSpinner() spinner.Model {
 	return s
 }
 
+// menuChromeHeight é o número de linhas fixas consumidas por tudo que não é conteúdo da
+// lista nem do viewport de saída: cabeçalho, bordas/padding do painel da lista, bordas/título
+// da caixa de saída e o rodapé. Usado tanto para limitar a altura da lista em terminais
+// pequenos (compactListHeight) quanto para calcular a altura disponível para o viewport de
+// saída (WindowSizeMsg em Update) — um único valor evita que os dois cálculos divirjam.
+const menuChromeHeight = 12
+
 // compactListHeight calcula a altura mínima necessária para renderizar o título da lista e
 // todos os itens, sem sobrar espaço vazio — o comportamento anterior fixava uma altura quase
 // igual à do terminal inteiro mesmo havendo só 4 itens, deixando a maior parte do painel em
@@ -190,7 +197,7 @@ func compactListHeight(itemCount, termHeight int) int {
 	// Medido empiricamente a partir de list.Model.View() — o delegate padrão do bubbles/list
 	// não expõe esses números diretamente.
 	needed := 3 + itemCount*3
-	maxAllowed := termHeight - 12 // reserva espaço para cabeçalho, viewport de saída e rodapé
+	maxAllowed := termHeight - menuChromeHeight
 	if maxAllowed < 3 {
 		maxAllowed = 3
 	}
@@ -274,7 +281,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		listHeight := compactListHeight(len(menuItems), msg.Height)
 		m.list.SetSize(msg.Width-6, listHeight)
 
-		vpHeight := msg.Height - listHeight - 11
+		vpHeight := msg.Height - listHeight - menuChromeHeight
 		if vpHeight < 3 {
 			vpHeight = 3
 		}
