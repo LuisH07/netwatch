@@ -169,7 +169,10 @@ func (m wifiPageModel) startConnect(mgr wifi.Manager, password string) (wifiPage
 	m.connecting = true
 	m.connectGen++
 	gen := m.connectGen
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// 45s: handshake WPA + DHCP em redes domésticas mais lentas costuma passar de 15s —
+	// um prazo curto demais faz o NetworkManager continuar tentando em segundo plano e
+	// terminar de conectar segundos depois de já termos reportado timeout ao usuário.
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	m.connectCancel = cancel
 	return m, connectCmd(ctx, mgr, m.targetSSID, password, gen)
 }
