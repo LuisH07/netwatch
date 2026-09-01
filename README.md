@@ -36,7 +36,7 @@ Projetado para rodar nativamente em distros Linux que utilizam o **NetworkManage
 ### Estado atual do projeto
 * **Diagnóstico completo de rede (`check`)**: Validação de IP ativo, testes de latência ICMP, DNS e verificação de portas TCP em paralelo, com alvos de DNS/TCP configuráveis via flags.
 * **Gerenciamento de Wi-Fi (`wifi`)**: Listagem formatada de redes disponíveis com indicador de sinal (`%-3d%%`), suporte a detecção de segurança e conexão segura com leitura oculta de senha (`term.ReadPassword`).
-* **Painel interativo (`menu`)**: TUI construída com Bubble Tea e tema Catppuccin Mocha, reunindo status, scan, desconexão e diagnóstico em um único painel navegável.
+* **Painel interativo (`menu`)**: TUI construída com Bubble Tea e tema Catppuccin Mocha, com 3 páginas navegáveis a qualquer momento (Status, Wi-Fi, Diagnóstico) — incluindo conectar a uma rede (com senha, quando necessário) sem sair da TUI.
 * **Instalação inteligente**: Script automatizado (`install.sh`) com suporte a compilação local (se clonado com Go) ou download direto da release oficial do GitHub.
 * **Arquitetura modular em Go**: Separação clara de comandos via `Cobra`, gerenciamento de erros customizados (`exitError`) e integração nativa com o D-Bus (`godbus/v5`).
 * **Cobertura de testes**: Suíte automatizada (`go test ./...`) cobrindo diagnóstico de rede, integração Wi-Fi/D-Bus e a TUI, com dependências externas (netlink, D-Bus, sockets ICMP) isoladas por interfaces fake.
@@ -114,7 +114,7 @@ go build -o netwatch .
 ./netwatch check
 ```
 
-> **Nota:** o comando `menu` reexecuta o próprio binário em segundo plano para rodar os outros subcomandos — isso funciona tanto com `go run .` quanto com o binário compilado localmente, sem depender de uma instalação prévia em `$PATH`.
+> **Nota:** o comando `menu` chama as mesmas funções internas dos demais subcomandos diretamente (sem reexecutar o binário como subprocesso), então funciona da mesma forma com `go run .` ou com o binário compilado localmente, sem depender de uma instalação prévia em `$PATH`.
 
 ## Autocompletar (Shell Completion)
 
@@ -220,7 +220,12 @@ netwatch menu
 
 ```
 
-* **Comportamento:** Abre uma TUI (Bubble Tea, tema Catppuccin Mocha) com uma lista navegável (`↑`/`↓` ou `j`/`k`, filtro com `/`) reunindo status da conexão, scan de redes, desconexão e diagnóstico completo. Ao selecionar um item com `Enter`, o comando correspondente é executado e o resultado aparece em uma caixa de saída abaixo da lista. Pressione `q` ou `Ctrl+C` para sair.
+* **Comportamento:** Abre uma TUI (Bubble Tea, tema Catppuccin Mocha) com 3 páginas trocáveis a qualquer momento por `Tab`/`Shift+Tab` ou pelos atalhos `1`/`2`/`3`:
+  * **Status** — conexão Wi-Fi atual (rede, interface, IP). `r` atualiza, `d` desconecta.
+  * **Wi-Fi** — lista ao vivo dos Access Points ao alcance (sinal, segurança, badges "Conectada"/"Conhecida"), com filtro por `/`. `Enter` numa rede conecta direto (ou pede a senha primeiro, se protegida — oculta com `•`, `Esc` cancela); o progresso é mostrado com um spinner e o resultado aparece na sequência.
+  * **Diagnóstico** — mesmo relatório detalhado do `netwatch check`, rodado automaticamente ao entrar na página e atualizável com `r`, num painel rolável (`PgUp`/`PgDn`).
+
+  `q`/`Ctrl+C` saem do programa a qualquer momento; `Esc` cancela apenas o passo atual do fluxo de conexão Wi-Fi.
 
 ---
 
