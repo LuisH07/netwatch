@@ -268,6 +268,22 @@ func (m wifiPageModel) Update(msg tea.Msg, mgr wifi.Manager, currentSSID string)
 			m.list, cmd = m.list.Update(msg)
 			return m, cmd
 		}
+
+	default:
+		// Mensagens internas de componentes (ex.: list.FilterMatchesMsg, que aplica o
+		// resultado assíncrono da filtragem, ou o piscar do cursor do textinput de senha)
+		// precisam ser repassadas ao componente ativo — sem isso, o filtro da lista nunca
+		// chega a estreitar os itens visíveis, mesmo com o texto digitado corretamente.
+		switch m.sub {
+		case wifiViewList:
+			var cmd tea.Cmd
+			m.list, cmd = m.list.Update(msg)
+			return m, cmd
+		case wifiViewPassword:
+			var cmd tea.Cmd
+			m.pwInput, cmd = m.pwInput.Update(msg)
+			return m, cmd
+		}
 	}
 	return m, nil
 }

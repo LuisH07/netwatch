@@ -263,6 +263,37 @@ func TestWifiPage_CapturingInput(t *testing.T) {
 	}
 }
 
+// TestWifiPage_FilterMatchesMsgNarrowsVisibleItems é uma regressão: filtragem em
+// bubbles/list é assíncrona — o texto digitado é aplicado de imediato ao textinput, mas
+// só um list.FilterMatchesMsg subsequente realmente estreita os itens visíveis. Sem um
+// caso default em wifiPageModel.Update para repassar mensagens desconhecidas ao
+// list.Model, essa mensagem era descartada e a lista nunca era filtrada de fato.
+func TestWifiPage_FilterMatchesMsgNarrowsVisibleItems(t *testing.T) {
+	m := newWifiPageModel()
+	m.list.SetSize(80, 20)
+	m.list.SetItems(apItemsFromAPs([]wifi.AccessPoint{{SSID: "CasaRede"}, {SSID: "Vizinho"}}, ""))
+
+	m.list, _ = m.list.Update(keyRune('/'))
+	if m.list.FilterState() != list.Filtering {
+		t.Fatal("setup failed: expected filtering state")
+	}
+
+	updated, cmd := m.Update(keyRune('C'), nil, "")
+	if cmd == nil {
+		t.Fatal("expected a command chain from typing while filtering")
+	}
+
+	matches, ok := findMsgOfType[list.FilterMatchesMsg](t, cmd())
+	if !ok {
+		t.Fatal("expected a list.FilterMatchesMsg among the produced commands")
+	}
+
+	final, _ := updated.Update(matches, nil, "")
+	if got := len(final.list.VisibleItems()); got != 1 {
+		t.Errorf("expected VisibleItems() to narrow to 1 after applying FilterMatchesMsg, got %d", got)
+	}
+}
+
 func TestWifiPage_View_ManagerError(t *testing.T) {
 	m := newWifiPageModel()
 	view := m.View(errors.New("dbus down"), "")
