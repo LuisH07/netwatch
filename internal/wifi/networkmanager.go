@@ -2,23 +2,41 @@ package wifi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 
 	"github.com/godbus/dbus/v5"
 )
 
+// ErrNoActiveConnection indica que não há nenhuma rede Wi-Fi ativa no momento —
+// não é uma falha de D-Bus/NetworkManager, apenas um estado esperado do dispositivo.
+var ErrNoActiveConnection = errors.New("nenhuma rede Wi-Fi ativa encontrada")
+
 const (
-	nmBusName        = "org.freedesktop.NetworkManager"
-	nmPath           = "/org/freedesktop/NetworkManager"
-	nmInterface      = "org.freedesktop.NetworkManager"
-	nmDeviceWifi     = 2   // NM_DEVICE_TYPE_WIFI
-	nmStateActivated = 100 // NM_DEVICE_STATE_ACTIVATED
+	nmBusName           = "org.freedesktop.NetworkManager"
+	nmPath              = "/org/freedesktop/NetworkManager"
+	nmInterface         = "org.freedesktop.NetworkManager"
+	nmDeviceWifi        = 2   // NM_DEVICE_TYPE_WIFI
+	nmStateUnavailable  = 20  // NM_DEVICE_STATE_UNAVAILABLE
+	nmStateDisconnected = 30  // NM_DEVICE_STATE_DISCONNECTED
+	nmStateActivated    = 100 // NM_DEVICE_STATE_ACTIVATED
+	nmStateFailed       = 120 // NM_DEVICE_STATE_FAILED
 )
+
+// dbusConn é o subconjunto de *dbus.Conn usado por NMManager, extraído para permitir
+// injetar uma conexão fake em testes sem depender de um barramento D-Bus real.
+type dbusConn interface {
+	Object(dest string, path dbus.ObjectPath) dbus.BusObject
+	AddMatchSignal(options ...dbus.MatchOption) error
+	RemoveMatchSignal(options ...dbus.MatchOption) error
+	Signal(ch chan<- *dbus.Signal)
+	RemoveSignal(ch chan<- *dbus.Signal)
+}
 
 // NMManager implementa a interface wifi.Manager utilizando comunicação D-Bus direta.
 type NMManager struct {
-	conn       *dbus.Conn
+	conn       dbusConn
 	wifiDevice dbus.ObjectPath // Cache do device Wi-Fi descoberto na inicialização
 	ifaceName  string          // Nome da interface física (ex: wlan0)
 }
@@ -31,6 +49,12 @@ func NewNetworkManager() (*NMManager, error) {
 		return nil, fmt.Errorf("falha ao conectar ao D-Bus do sistema: %w", err)
 	}
 
+	return newNMManager(conn)
+}
+
+// newNMManager constrói um NMManager a partir de uma dbusConn já estabelecida — separado
+// de NewNetworkManager para permitir testes com uma conexão fake.
+func newNMManager(conn dbusConn) (*NMManager, error) {
 	m := &NMManager{conn: conn}
 	if err := m.discoverWiFiDevice(); err != nil {
 		return nil, err
@@ -91,17 +115,63 @@ func (m *NMManager) findKnownConnection(ssid string) (dbus.ObjectPath, bool, err
 			continue
 		}
 
-		if wifiSec, ok := settings["wifi"]; ok {
-			if ssidVar, exists := wifiSec["ssid"]; exists {
-				var savedSSID []byte
-				if err := ssidVar.Store(&savedSSID); err == nil && string(savedSSID) == ssid {
-					return cp, true, nil
-				}
-			}
+		// GetSettings retorna a seção Wi-Fi sob a chave canônica "802-11-wireless" — "wifi"
+		// é apenas um alias aceito por algumas APIs de mais alto nível (ex.: nmcli), nunca
+		// o nome usado pelo D-Bus GetSettings. Checar apenas "wifi" fazia essa função nunca
+		// encontrar um perfil salvo, tratando toda rede como "desconhecida" indefinidamente.
+		wifiSec, ok := settings["802-11-wireless"]
+		if !ok {
+			continue
+		}
+		ssidVar, exists := wifiSec["ssid"]
+		if !exists {
+			continue
+		}
+		var savedSSID []byte
+		if err := ssidVar.Store(&savedSSID); err == nil && string(savedSSID) == ssid {
+			return cp, true, nil
 		}
 	}
 
 	return "", false, nil
+}
+
+// updateConnectionPassword sobrescreve a senha (PSK) de um perfil de conexão já salvo,
+// preservando o restante de suas configurações. Necessário para que reativar um perfil
+// conhecido respeite uma senha nova digitada pelo usuário, em vez de sempre reusar a senha
+// antiga armazenada — caso contrário "wifi connect" nunca se recupera de uma senha trocada.
+func (m *NMManager) updateConnectionPassword(connPath dbus.ObjectPath, password string) error {
+	connObj := m.conn.Object(nmBusName, connPath)
+
+	var settings map[string]map[string]dbus.Variant
+	if err := connObj.Call("org.freedesktop.NetworkManager.Settings.Connection.GetSettings", 0).Store(&settings); err != nil {
+		return fmt.Errorf("falha ao ler configurações salvas: %w", err)
+	}
+
+	if settings["802-11-wireless-security"] == nil {
+		settings["802-11-wireless-security"] = map[string]dbus.Variant{}
+	}
+	settings["802-11-wireless-security"]["key-mgmt"] = dbus.MakeVariant("wpa-psk")
+	settings["802-11-wireless-security"]["psk"] = dbus.MakeVariant(password)
+
+	return connObj.Call("org.freedesktop.NetworkManager.Settings.Connection.Update", 0, settings).Store()
+}
+
+// isSecuredFromFlags reporta se um Access Point é protegido com base em suas flags WPA/RSN.
+// Função pura, sem I/O, para poder ser testada isoladamente das chamadas D-Bus.
+func isSecuredFromFlags(wpaFlags, rsnFlags uint32) bool {
+	return wpaFlags != 0 || rsnFlags != 0
+}
+
+// apSecurityFlags lê as flags WPA/RSN de um Access Point via D-Bus.
+func (m *NMManager) apSecurityFlags(apObj dbus.BusObject) (wpaFlags, rsnFlags uint32) {
+	if v, err := apObj.GetProperty("org.freedesktop.NetworkManager.AccessPoint.WpaFlags"); err == nil {
+		_ = v.Store(&wpaFlags)
+	}
+	if v, err := apObj.GetProperty("org.freedesktop.NetworkManager.AccessPoint.RsnFlags"); err == nil {
+		_ = v.Store(&rsnFlags)
+	}
+	return wpaFlags, rsnFlags
 }
 
 // List consulta o NetworkManager via D-Bus para obter os Access Points disponíveis.
@@ -152,15 +222,8 @@ func (m *NMManager) List(ctx context.Context) ([]AccessPoint, error) {
 			_ = vHw.Store(&hwAddress)
 		}
 
-		var wpaFlags, rsnFlags uint32
-		if vWpa, err := apObj.GetProperty("org.freedesktop.NetworkManager.AccessPoint.WpaFlags"); err == nil {
-			_ = vWpa.Store(&wpaFlags)
-		}
-		if vRsn, err := apObj.GetProperty("org.freedesktop.NetworkManager.AccessPoint.RsnFlags"); err == nil {
-			_ = vRsn.Store(&rsnFlags)
-		}
-
-		secured := (wpaFlags != 0 || rsnFlags != 0)
+		wpaFlags, rsnFlags := m.apSecurityFlags(apObj)
+		secured := isSecuredFromFlags(wpaFlags, rsnFlags)
 
 		// Utiliza a função unificada de verificação de perfil
 		_, known, _ := m.findKnownConnection(ssidStr)
@@ -197,15 +260,9 @@ func (m *NMManager) Connect(ctx context.Context, ssid string, password string) e
 		var ssidBytes []byte
 		if err := vSsid.Store(&ssidBytes); err == nil && string(ssidBytes) == ssid {
 			targetAPPath = apPath
-			
-			var wpaFlags, rsnFlags uint32
-			if vWpa, err := apObj.GetProperty("org.freedesktop.NetworkManager.AccessPoint.WpaFlags"); err == nil {
-				_ = vWpa.Store(&wpaFlags)
-			}
-			if vRsn, err := apObj.GetProperty("org.freedesktop.NetworkManager.AccessPoint.RsnFlags"); err == nil {
-				_ = vRsn.Store(&rsnFlags)
-			}
-			isSecuredAP = (wpaFlags != 0 || rsnFlags != 0)
+
+			wpaFlags, rsnFlags := m.apSecurityFlags(apObj)
+			isSecuredAP = isSecuredFromFlags(wpaFlags, rsnFlags)
 			break
 		}
 	}
@@ -241,6 +298,15 @@ func (m *NMManager) Connect(ctx context.Context, ssid string, password string) e
 	}
 
 	if known {
+		// Se uma senha foi fornecida, atualiza as credenciais do perfil salvo antes de
+		// ativar — sem isso, reativar um perfil existente ignorava silenciosamente
+		// qualquer senha nova digitada pelo usuário, fazendo "wifi connect" falhar
+		// indefinidamente sempre que a senha da rede mudasse.
+		if password != "" {
+			if err := m.updateConnectionPassword(savedConnPath, password); err != nil {
+				return fmt.Errorf("falha ao atualizar credenciais salvas: %w", err)
+			}
+		}
 		// Ativa perfil existente reutilizando o ObjectPath descoberto
 		if err := nmObj.Call("org.freedesktop.NetworkManager.ActivateConnection", 0, savedConnPath, m.wifiDevice, dbus.ObjectPath("/")).Store(); err != nil {
 			return fmt.Errorf("falha ao ativar conexão existente: %w", err)
@@ -294,8 +360,13 @@ func (m *NMManager) Connect(ctx context.Context, ssid string, password string) e
 					if newState == nmStateActivated {
 						return nil
 					}
-					if newState == 20 { // NM_DEVICE_STATE_FAILED
-						return fmt.Errorf("falha na autenticação ou estabelecimento da conexão Wi-Fi")
+					// NM_DEVICE_STATE_FAILED indica falha explícita; qualquer estado <= DISCONNECTED
+					// alcançado enquanto aguardamos ativação (ex.: o driver desiste após rejeitar a
+					// senha e volta direto para "disconnected" sem passar por "failed") também é uma
+					// falha real — sem isso, esses casos só eram detectados 15s depois, no timeout do
+					// contexto, com uma mensagem genérica de "tempo esgotado" em vez do motivo real.
+					if newState == nmStateFailed || newState <= nmStateDisconnected {
+						return fmt.Errorf("falha na autenticação ou estabelecimento da conexão Wi-Fi (estado NetworkManager: %d)", newState)
 					}
 				}
 			}
@@ -310,11 +381,11 @@ func (m *NMManager) Disconnect(ctx context.Context) error {
 	}
 
 	devObj := m.conn.Object(nmBusName, m.wifiDevice)
-	
+
 	var state uint32
 	if v, err := devObj.GetProperty("org.freedesktop.NetworkManager.Device.State"); err == nil {
 		_ = v.Store(&state)
-		if state <= 3 {
+		if state <= nmStateUnavailable {
 			return fmt.Errorf("dispositivo Wi-Fi indisponível ou desativado")
 		}
 		if state < nmStateActivated {
@@ -344,7 +415,7 @@ func (m *NMManager) Current(ctx context.Context) (Connection, error) {
 	}
 
 	if activeAPPath == "/" || activeAPPath == "" {
-		return Connection{}, fmt.Errorf("nenhuma rede Wi-Fi ativa encontrada")
+		return Connection{}, ErrNoActiveConnection
 	}
 
 	apObj := m.conn.Object(nmBusName, activeAPPath)
