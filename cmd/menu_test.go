@@ -217,6 +217,37 @@ func TestModel_Update_ManagerReadyError_NoCurrentConnFetch(t *testing.T) {
 	}
 }
 
+// TestModel_Update_EnteringStatusPageRefetchesCurrentConn é uma regressão: sem reconsultar
+// o NetworkManager a cada entrada na página Status, uma rede que caiu por qualquer motivo
+// externo à TUI (sinal, roteador, etc.) continuava aparecendo como conectada indefinidamente,
+// já que currentConn só era buscado uma vez no início.
+func TestModel_Update_EnteringStatusPageRefetchesCurrentConn(t *testing.T) {
+	fm := &fakeManager{currentResult: wifi.Connection{SSID: "RedeAtual"}}
+
+	for name, transition := range map[string]func(m model) (tea.Model, tea.Cmd){
+		"tab":    func(m model) (tea.Model, tea.Cmd) { return m.Update(tea.KeyMsg(tea.Key{Type: tea.KeyTab})) },
+		"number": func(m model) (tea.Model, tea.Cmd) { return m.Update(keyRune('1')) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := buildModel()
+			m.mgr = fm
+			m.page = pageDiag // começa fora de Status
+
+			updated, cmd := transition(m)
+			mm := updated.(model)
+			if mm.page != pageStatus {
+				t.Fatalf("expected to land on pageStatus, got %v", mm.page)
+			}
+			if cmd == nil {
+				t.Fatal("expected a command to refetch the current connection")
+			}
+			if _, ok := findMsgOfType[currentConnMsg](t, cmd()); !ok {
+				t.Fatal("expected a currentConnMsg among the produced commands")
+			}
+		})
+	}
+}
+
 func TestModel_View_NoPanicAndShowsTabs(t *testing.T) {
 	m := buildModel()
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})

@@ -93,8 +93,6 @@ var wifiConnectCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ssid := args[0]
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
 
 		mgr, err := newManager()
 		if err != nil {
@@ -102,8 +100,12 @@ var wifiConnectCmd = &cobra.Command{
 			return &exitError{code: 2}
 		}
 
-		// Verifica se a rede exige senha através da listagem rápida de APs
-		aps, err := mgr.List(ctx)
+		// Verifica se a rede exige senha através da listagem rápida de APs, com seu próprio
+		// prazo curto — não pode compartilhar o mesmo contexto usado depois para aguardar a
+		// conexão, senão o tempo já gasto aqui seria descontado do orçamento de Connect().
+		listCtx, listCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer listCancel()
+		aps, err := mgr.List(listCtx)
 		var isSecured bool
 		if err == nil {
 			for _, ap := range aps {
@@ -127,7 +129,12 @@ var wifiConnectCmd = &cobra.Command{
 		}
 
 		fmt.Printf("Conectando a %s...\n", ssid)
-		err = mgr.Connect(ctx, ssid, password)
+		// 45s: handshake WPA + DHCP em redes domésticas mais lentas costuma passar de 15s —
+		// um prazo curto demais faz o NetworkManager continuar tentando em segundo plano e
+		// terminar de conectar segundos depois de já termos reportado timeout ao usuário.
+		connectCtx, connectCancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer connectCancel()
+		err = mgr.Connect(connectCtx, ssid, password)
 		if err != nil {
 			fmt.Printf("Erro ao conectar: %v\n", err)
 			return &exitError{code: 1}

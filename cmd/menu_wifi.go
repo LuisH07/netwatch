@@ -169,7 +169,10 @@ func (m wifiPageModel) startConnect(mgr wifi.Manager, password string) (wifiPage
 	m.connecting = true
 	m.connectGen++
 	gen := m.connectGen
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// 45s: handshake WPA + DHCP em redes domésticas mais lentas costuma passar de 15s —
+	// um prazo curto demais faz o NetworkManager continuar tentando em segundo plano e
+	// terminar de conectar segundos depois de já termos reportado timeout ao usuário.
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	m.connectCancel = cancel
 	return m, connectCmd(ctx, mgr, m.targetSSID, password, gen)
 }
@@ -266,6 +269,22 @@ func (m wifiPageModel) Update(msg tea.Msg, mgr wifi.Manager, currentSSID string)
 			}
 			var cmd tea.Cmd
 			m.list, cmd = m.list.Update(msg)
+			return m, cmd
+		}
+
+	default:
+		// Mensagens internas de componentes (ex.: list.FilterMatchesMsg, que aplica o
+		// resultado assíncrono da filtragem, ou o piscar do cursor do textinput de senha)
+		// precisam ser repassadas ao componente ativo — sem isso, o filtro da lista nunca
+		// chega a estreitar os itens visíveis, mesmo com o texto digitado corretamente.
+		switch m.sub {
+		case wifiViewList:
+			var cmd tea.Cmd
+			m.list, cmd = m.list.Update(msg)
+			return m, cmd
+		case wifiViewPassword:
+			var cmd tea.Cmd
+			m.pwInput, cmd = m.pwInput.Update(msg)
 			return m, cmd
 		}
 	}
