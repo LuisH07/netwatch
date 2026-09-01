@@ -215,20 +215,27 @@ func (m model) isLoading() bool {
 	return initialLoad || m.status.disconnecting || m.wifi.isLoading() || m.diag.running
 }
 
-// onPageEntered dispara a primeira carga automática de uma página (scan de Wi-Fi,
-// diagnóstico), se ainda não tiver ocorrido, ao entrar/trocar para ela.
+// onPageEntered dispara a carga automática de uma página ao entrar/trocar para ela: o scan
+// de Wi-Fi e o diagnóstico rodam só na primeira visita (ver onEnter de cada sub-model), mas
+// a conexão atual é sempre reconsultada — sem isso, Status/Wi-Fi ficam mostrando uma rede
+// como conectada indefinidamente mesmo depois dela cair por qualquer motivo externo à TUI.
 func (m *model) onPageEntered() tea.Cmd {
+	var cmd tea.Cmd
+	if m.mgr != nil && (m.page == pageStatus || m.page == pageWifi) {
+		cmd = fetchCurrentConnCmd(m.mgr)
+	}
+
 	switch m.page {
 	case pageWifi:
-		var cmd tea.Cmd
-		m.wifi, cmd = m.wifi.onEnter(m.mgr)
-		return cmd
+		var wifiCmd tea.Cmd
+		m.wifi, wifiCmd = m.wifi.onEnter(m.mgr)
+		cmd = tea.Batch(cmd, wifiCmd)
 	case pageDiag:
-		var cmd tea.Cmd
-		m.diag, cmd = m.diag.onEnter()
-		return cmd
+		var diagCmd tea.Cmd
+		m.diag, diagCmd = m.diag.onEnter()
+		cmd = tea.Batch(cmd, diagCmd)
 	}
-	return nil
+	return cmd
 }
 
 // dispatchToPage repassa msg para o Update da página atualmente ativa.
@@ -320,6 +327,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmd = m.onPageEntered()
 			case "1":
 				m.page = pageStatus
+				cmd = m.onPageEntered()
 			case "2":
 				m.page = pageWifi
 				cmd = m.onPageEntered()
