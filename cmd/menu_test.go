@@ -1,92 +1,31 @@
 package cmd
 
 import (
+	"errors"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/viewport"
+	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
+	"netwatch/internal/wifi"
 )
-
-func withSelfPath(t *testing.T, path string) {
-	t.Helper()
-	orig := selfPath
-	selfPath = path
-	t.Cleanup(func() { selfPath = orig })
-}
-
-func withCLITimeout(t *testing.T, d time.Duration) {
-	t.Helper()
-	orig := cliTimeout
-	cliTimeout = d
-	t.Cleanup(func() { cliTimeout = orig })
-}
 
 // buildModel replica a construção de model feita em menuCmd.Run, sem iniciar um tea.Program.
 func buildModel() model {
-	return model{list: newMenuList(), spinner: newSpinner(), viewport: viewport.New(0, 0)}
+	return model{
+		spinner: newSpinner(),
+		status:  newStatusPageModel(),
+		wifi:    newWifiPageModel(),
+		diag:    newDiagPageModel(),
+	}
 }
 
-// runBatch invoca cada tea.Cmd de um tea.BatchMsg e retorna as mensagens produzidas, na
-// mesma ordem — usado para testar comandos disparados via tea.Batch sem depender do runtime
-// completo do Bubble Tea.
-func runBatch(t *testing.T, cmd tea.Cmd) []tea.Msg {
-	t.Helper()
-	batch, ok := cmd().(tea.BatchMsg)
-	if !ok {
-		t.Fatalf("expected tea.BatchMsg, got %T", cmd())
-	}
-	msgs := make([]tea.Msg, 0, len(batch))
-	for _, c := range batch {
-		msgs = append(msgs, c())
-	}
-	return msgs
-}
-
-// findCLIResult procura uma cliResultMsg dentre as mensagens produzidas por runBatch.
-func findCLIResult(t *testing.T, msgs []tea.Msg) cliResultMsg {
-	t.Helper()
-	for _, msg := range msgs {
-		if res, ok := msg.(cliResultMsg); ok {
-			return res
-		}
-	}
-	t.Fatal("expected one of the batched commands to produce a cliResultMsg")
-	return cliResultMsg{}
-}
-
-func TestItem_Accessors(t *testing.T) {
-	i := item{title: "Título", desc: "Descrição", action: "check", icon: "X"}
-	if got := i.Title(); got != "X Título" {
-		t.Errorf("Title() = %q, want %q", got, "X Título")
-	}
-	if got := i.Description(); got != "Descrição" {
-		t.Errorf("Description() = %q, want %q", got, "Descrição")
-	}
-	if got := i.FilterValue(); got != "Título" {
-		t.Errorf("FilterValue() = %q, want %q", got, "Título")
-	}
-}
+func keyRune(r rune) tea.KeyMsg { return tea.KeyMsg(tea.Key{Type: tea.KeyRunes, Runes: []rune{r}}) }
 
 func TestModel_Init(t *testing.T) {
 	m := buildModel()
-	if cmd := m.Init(); cmd != nil {
-		t.Errorf("Init() = %v, want nil", cmd)
-	}
-}
-
-func TestModel_Update_WindowSize(t *testing.T) {
-	m := buildModel()
-
-	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
-	mm, ok := updated.(model)
-	if !ok {
-		t.Fatalf("expected model, got %T", updated)
-	}
-	if mm.width != 100 || mm.height != 40 {
-		t.Errorf("width/height = %d/%d, want 100/40", mm.width, mm.height)
+	if cmd := m.Init(); cmd == nil {
+		t.Error("expected Init() to kick off manager initialization")
 	}
 }
 
@@ -98,7 +37,7 @@ func TestModel_Update_QuitKeys(t *testing.T) {
 			if key == "ctrl+c" {
 				msg = tea.KeyMsg(tea.Key{Type: tea.KeyCtrlC})
 			} else {
-				msg = tea.KeyMsg(tea.Key{Type: tea.KeyRunes, Runes: []rune("q")})
+				msg = keyRune('q')
 			}
 
 			_, cmd := m.Update(msg)
@@ -112,164 +51,181 @@ func TestModel_Update_QuitKeys(t *testing.T) {
 	}
 }
 
-func TestModel_Update_EnterStartsAsyncExecution(t *testing.T) {
-	withSelfPath(t, "/bin/echo")
-
+func TestModel_Update_WindowSize(t *testing.T) {
 	m := buildModel()
-	updated, cmd := m.Update(tea.KeyMsg(tea.Key{Type: tea.KeyEnter}))
-	mm, ok := updated.(model)
-	if !ok {
-		t.Fatalf("expected model, got %T", updated)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	mm := updated.(model)
+	if mm.width != 100 || mm.height != 40 {
+		t.Errorf("width/height = %d/%d, want 100/40", mm.width, mm.height)
 	}
-	if !mm.running {
-		t.Error("expected model.running = true immediately after Enter, before the subprocess finishes")
+	if mm.wifi.list.Width() == 0 {
+		t.Error("expected the Wi-Fi list to be resized on WindowSizeMsg regardless of active page")
 	}
-	if mm.actionName == "" {
-		t.Error("expected actionName to be set to the selected item's title")
+}
+
+func TestModel_Update_TabCyclesPages(t *testing.T) {
+	m := buildModel()
+	if m.page != pageStatus {
+		t.Fatalf("expected initial page to be pageStatus, got %v", m.page)
+	}
+
+	updated, _ := m.Update(tea.KeyMsg(tea.Key{Type: tea.KeyTab}))
+	mm := updated.(model)
+	if mm.page != pageWifi {
+		t.Errorf("page after Tab = %v, want pageWifi", mm.page)
+	}
+
+	updated, _ = mm.Update(tea.KeyMsg(tea.Key{Type: tea.KeyShiftTab}))
+	mm = updated.(model)
+	if mm.page != pageStatus {
+		t.Errorf("page after Shift+Tab = %v, want pageStatus", mm.page)
+	}
+}
+
+func TestModel_Update_NumberKeysJumpToPage(t *testing.T) {
+	m := buildModel()
+	updated, _ := m.Update(keyRune('3'))
+	mm := updated.(model)
+	if mm.page != pageDiag {
+		t.Errorf("page after '3' = %v, want pageDiag", mm.page)
+	}
+}
+
+func TestModel_Update_TabTriggersOnEnterForWifi(t *testing.T) {
+	m := buildModel()
+	m.mgr = &fakeManager{}
+
+	updated, cmd := m.Update(keyRune('2'))
+	mm := updated.(model)
+	if mm.page != pageWifi {
+		t.Fatalf("expected pageWifi, got %v", mm.page)
+	}
+	if !mm.wifi.scanning {
+		t.Error("expected entering the Wi-Fi page to trigger an automatic scan")
 	}
 	if cmd == nil {
-		t.Fatal("expected a non-nil tea.Cmd to kick off spinner ticking and the async command")
+		t.Fatal("expected a non-nil scan command")
 	}
 }
 
-func TestModel_Update_EnterIgnoredWhileRunning(t *testing.T) {
+// TestModel_Update_GlobalKeysGatedDuringPasswordEntry é uma regressão: sem o gate de
+// capturingInput, digitar dígitos ou "q" numa senha trocaria de aba/encerraria o programa em
+// vez de compor o texto digitado.
+func TestModel_Update_GlobalKeysGatedDuringPasswordEntry(t *testing.T) {
 	m := buildModel()
-	m.running = true
+	m.page = pageWifi
+	m.wifi.sub = wifiViewPassword
+	m.wifi.pwInput.Focus()
 
-	_, cmd := m.Update(tea.KeyMsg(tea.Key{Type: tea.KeyEnter}))
-	if cmd != nil {
-		t.Error("expected Enter to be a no-op while a command is already running")
-	}
-}
-
-func TestModel_Update_CLIResultEndsRunningState(t *testing.T) {
-	withSelfPath(t, "/bin/echo")
-
-	m := buildModel()
-	updated, cmd := m.Update(tea.KeyMsg(tea.Key{Type: tea.KeyEnter}))
+	updated, cmd := m.Update(keyRune('q'))
 	mm := updated.(model)
+	if mm.page != pageWifi {
+		t.Error("expected 'q' to be forwarded to the password field, not trigger a page switch")
+	}
+	if cmd != nil {
+		if _, isQuit := cmd().(tea.QuitMsg); isQuit {
+			t.Error("expected 'q' during password entry to NOT quit the program")
+		}
+	}
+	if mm.wifi.pwInput.Value() != "q" {
+		t.Errorf("expected 'q' to be typed into the password field, got value %q", mm.wifi.pwInput.Value())
+	}
+}
 
-	result := findCLIResult(t, runBatch(t, cmd))
+// TestModel_Update_GlobalKeysGatedWhileFilteringWifiList é a mesma regressão para o modo de
+// filtro da lista de Wi-Fi.
+func TestModel_Update_GlobalKeysGatedWhileFilteringWifiList(t *testing.T) {
+	m := buildModel()
+	m.page = pageWifi
+	m.wifi.list.SetItems(apItemsFromAPs([]wifi.AccessPoint{{SSID: "Rede1"}, {SSID: "Rede2"}}, ""))
+	// Entra em modo de filtro (tecla "/").
+	m.wifi.list, _ = m.wifi.list.Update(keyRune('/'))
+	if m.wifi.list.FilterState() != list.Filtering {
+		t.Fatal("setup failed: expected the list to be in filtering state")
+	}
 
-	updated2, _ := mm.Update(result)
-	mm2, ok := updated2.(model)
+	updated, _ := m.Update(keyRune('2'))
+	mm := updated.(model)
+	if mm.page != pageWifi {
+		t.Error("expected '2' to be forwarded to the filter input, not trigger a page jump")
+	}
+}
+
+func TestModel_Update_BackgroundWifiResultAppliedAfterPageSwitch(t *testing.T) {
+	m := buildModel()
+	m.mgr = &fakeManager{}
+	m.page = pageDiag // usuário já saiu da aba Wi-Fi
+
+	updated, _ := m.Update(wifiScannedMsg{aps: []wifi.AccessPoint{{SSID: "RedeX"}}})
+	mm := updated.(model)
+	if mm.page != pageDiag {
+		t.Fatal("page switch should not happen implicitly")
+	}
+	if len(mm.wifi.list.Items()) != 1 {
+		t.Errorf("expected the scan result to be applied to the Wi-Fi page even while on a different tab, got %d items", len(mm.wifi.list.Items()))
+	}
+}
+
+func TestModel_Update_ManagerReadyFetchesCurrentConn(t *testing.T) {
+	m := buildModel()
+	fm := &fakeManager{currentResult: wifi.Connection{SSID: "RedeAtual"}}
+
+	updated, cmd := m.Update(managerReadyMsg{mgr: fm})
+	mm := updated.(model)
+	if mm.mgr != fm {
+		t.Fatal("expected mgr to be stored")
+	}
+	if cmd == nil {
+		t.Fatal("expected a command to fetch the current connection")
+	}
+
+	connMsg, ok := findMsgOfType[currentConnMsg](t, cmd())
 	if !ok {
-		t.Fatalf("expected model, got %T", updated2)
+		t.Fatal("expected a currentConnMsg among the produced commands")
 	}
-	if mm2.running {
-		t.Error("expected running = false after receiving cliResultMsg")
-	}
-	if mm2.outputErr {
-		t.Error("expected outputErr = false for a successful command")
-	}
-	if !strings.Contains(mm2.output, "wifi") {
-		t.Errorf("expected output to contain the executed action's args, got %q", mm2.output)
+	if connMsg.conn.SSID != "RedeAtual" {
+		t.Errorf("SSID = %q, want RedeAtual", connMsg.conn.SSID)
 	}
 }
 
-func TestModel_Update_CLIResultMarksFailure(t *testing.T) {
-	withSelfPath(t, "/bin/false")
-
-	m := buildModel()
-	updated, cmd := m.Update(tea.KeyMsg(tea.Key{Type: tea.KeyEnter}))
-	mm := updated.(model)
-
-	result := findCLIResult(t, runBatch(t, cmd))
-
-	updated2, _ := mm.Update(result)
-	mm2 := updated2.(model)
-	if !mm2.outputErr {
-		t.Error("expected outputErr = true when the executed subcommand fails")
-	}
-}
-
-func TestModel_Update_SpinnerTickIgnoredWhenNotRunning(t *testing.T) {
-	m := buildModel()
-	m.running = false
-
-	_, cmd := m.Update(spinner.TickMsg{})
-	if cmd != nil {
-		t.Error("expected spinner ticks to be ignored when no command is running")
-	}
-}
-
-func TestModel_Update_PageScrollForwardedToViewport(t *testing.T) {
-	m := buildModel()
-	m.output = strings.Repeat("linha\n", 200)
-	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
-	mm := updated.(model)
-
-	updated2, _ := mm.Update(tea.KeyMsg(tea.Key{Type: tea.KeyPgDown}))
-	mm2 := updated2.(model)
-	if mm2.viewport.YOffset == 0 {
-		t.Error("expected pgdown to move the viewport's scroll offset")
-	}
-}
-
-func TestCompactListHeight(t *testing.T) {
-	tests := []struct {
-		name       string
-		itemCount  int
-		termHeight int
-		want       int
-	}{
-		{"plenty of room", 4, 100, 3 + 4*3},
-		{"clamped by small terminal", 4, 20, 8},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := compactListHeight(tt.itemCount, tt.termHeight); got != tt.want {
-				t.Errorf("compactListHeight(%d, %d) = %d, want %d", tt.itemCount, tt.termHeight, got, tt.want)
+// findMsgOfType invoca msg (desempacotando um tea.BatchMsg se necessário) e procura uma
+// mensagem do tipo T entre o(s) resultado(s).
+func findMsgOfType[T any](t *testing.T, msg tea.Msg) (T, bool) {
+	t.Helper()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, c := range batch {
+			if v, ok := findMsgOfType[T](t, c()); ok {
+				return v, true
 			}
-		})
+		}
+		var zero T
+		return zero, false
+	}
+	v, ok := msg.(T)
+	return v, ok
+}
+
+func TestModel_Update_ManagerReadyError_NoCurrentConnFetch(t *testing.T) {
+	m := buildModel()
+	updated, cmd := m.Update(managerReadyMsg{err: errors.New("dbus down")})
+	mm := updated.(model)
+	if mm.mgrErr == nil {
+		t.Fatal("expected mgrErr to be set")
+	}
+	if cmd != nil {
+		t.Error("expected no follow-up command when manager init fails")
 	}
 }
 
-func TestModel_View_NoPanicAndContainsHeader(t *testing.T) {
+func TestModel_View_NoPanicAndShowsTabs(t *testing.T) {
 	m := buildModel()
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	mm := updated.(model)
-	mm.output = "algum resultado"
 
 	view := mm.View()
-	if !strings.Contains(view, "NETWATCH") {
-		t.Error("expected view to contain the NETWATCH header")
-	}
-	if !strings.Contains(view, "RESULTADO DA EXECUÇÃO") {
-		t.Error("expected view to render the output box when output is set")
-	}
-}
-
-func TestExecuteCLI_Success(t *testing.T) {
-	withSelfPath(t, "/bin/echo")
-
-	out := executeCLI("hello")
-	if strings.TrimSpace(out) != "hello" {
-		t.Errorf("executeCLI output = %q, want \"hello\"", out)
-	}
-}
-
-func TestExecuteCLI_CommandError(t *testing.T) {
-	withSelfPath(t, "/bin/false")
-
-	out := executeCLI()
-	if !strings.Contains(out, "Erro ao executar") {
-		t.Errorf("expected error message for a failing command, got %q", out)
-	}
-}
-
-func TestExecuteCLI_Timeout(t *testing.T) {
-	withSelfPath(t, "/bin/sleep")
-	withCLITimeout(t, 50*time.Millisecond)
-
-	start := time.Now()
-	out := executeCLI("5")
-	elapsed := time.Since(start)
-
-	if elapsed > 3*time.Second {
-		t.Errorf("executeCLI took %v, expected it to be killed near the 50ms timeout", elapsed)
-	}
-	if !strings.Contains(out, "Erro ao executar") {
-		t.Errorf("expected error message when the subprocess is killed by timeout, got %q", out)
+	for _, want := range []string{"NETWATCH", "Status", "Wi-Fi", "Diagnóstico"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("expected view to contain %q", want)
+		}
 	}
 }
