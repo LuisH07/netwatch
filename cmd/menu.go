@@ -23,6 +23,8 @@ var (
 	catGreen    = lipgloss.Color("#a6e3a1")
 	catMauve    = lipgloss.Color("#cba6f7")
 	catBlue     = lipgloss.Color("#89b4fa")
+	catRed      = lipgloss.Color("#f38ba8")
+	catYellow   = lipgloss.Color("#f9e2af")
 )
 
 // Estilos de Componentes
