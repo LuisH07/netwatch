@@ -307,12 +307,25 @@ func setupConnectScenario(t *testing.T, ssid string, secured bool) (*fakeConn, d
 // sendStateChanged envia, assim que Connect registra o canal de sinais, um StateChanged
 // para o dispositivo Wi-Fi com o estado informado.
 func sendStateChangedWhenReady(conn *fakeConn, state uint32) {
+	sendStateSequenceWhenReady(conn, []stateTransition{{new: state, old: 0}})
+}
+
+type stateTransition struct {
+	new, old uint32
+}
+
+// sendStateSequenceWhenReady envia, em ordem, uma sequência de sinais StateChanged assim que
+// Connect() registra o canal — usada para simular transições intermediárias reais do
+// NetworkManager (ex.: desativar a rede anterior antes de ativar a nova).
+func sendStateSequenceWhenReady(conn *fakeConn, transitions []stateTransition) {
 	conn.onSignalRegistered = func() {
 		go func() {
-			conn.sigChan <- &dbus.Signal{
-				Path: testWifiDevicePath,
-				Name: "org.freedesktop.NetworkManager.Device.StateChanged",
-				Body: []any{state, uint32(0), uint32(0)},
+			for _, t := range transitions {
+				conn.sigChan <- &dbus.Signal{
+					Path: testWifiDevicePath,
+					Name: "org.freedesktop.NetworkManager.Device.StateChanged",
+					Body: []any{t.new, t.old, uint32(0)},
+				}
 			}
 		}()
 	}
@@ -469,6 +482,33 @@ func TestConnect_DisconnectedDuringAttemptIsFailure(t *testing.T) {
 	}
 	if elapsed > time.Second {
 		t.Errorf("expected fast failure detection, took %v (should not wait for the 2s context timeout)", elapsed)
+	}
+}
+
+// TestConnect_TeardownOfPreviousNetworkIsNotFailure é uma regressão: ao trocar de rede
+// enquanto já conectado a outra, o NetworkManager primeiro desativa a rede anterior
+// (StateChanged ACTIVATED -> DISCONNECTED) antes de sequer começar a ativar a nova. Esse
+// teardown esperado não pode ser reportado como falha da nova tentativa de conexão.
+func TestConnect_TeardownOfPreviousNetworkIsNotFailure(t *testing.T) {
+	conn, _ := setupConnectScenario(t, "RedeNova", false)
+	conn.objects[nmPath].withCall(
+		"org.freedesktop.NetworkManager.AddAndActivateConnection", nil,
+		dbus.ObjectPath("/active/6"), dbus.ObjectPath("/added/6"))
+	sendStateSequenceWhenReady(conn, []stateTransition{
+		{new: nmStateDisconnected, old: nmStateActivated}, // desativando a rede anterior
+		{new: nmStateActivated, old: nmStateDisconnected}, // rede nova efetivamente ativada
+	})
+
+	m, err := newNMManager(conn)
+	if err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := m.Connect(ctx, "RedeNova", ""); err != nil {
+		t.Fatalf("expected success (previous-network teardown should be ignored), got error: %v", err)
 	}
 }
 

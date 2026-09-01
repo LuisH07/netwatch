@@ -360,12 +360,23 @@ func (m *NMManager) Connect(ctx context.Context, ssid string, password string) e
 					if newState == nmStateActivated {
 						return nil
 					}
-					// NM_DEVICE_STATE_FAILED indica falha explícita; qualquer estado <= DISCONNECTED
-					// alcançado enquanto aguardamos ativação (ex.: o driver desiste após rejeitar a
-					// senha e volta direto para "disconnected" sem passar por "failed") também é uma
-					// falha real — sem isso, esses casos só eram detectados 15s depois, no timeout do
-					// contexto, com uma mensagem genérica de "tempo esgotado" em vez do motivo real.
-					if newState == nmStateFailed || newState <= nmStateDisconnected {
+					if newState == nmStateFailed {
+						return fmt.Errorf("falha na autenticação ou estabelecimento da conexão Wi-Fi (estado NetworkManager: %d)", newState)
+					}
+					// Um estado <= DISCONNECTED alcançado enquanto aguardamos ativação também indica
+					// falha real (ex.: o driver desiste após rejeitar a senha e volta direto para
+					// "disconnected" sem passar por "failed") — sem isso, esses casos só eram
+					// detectados 15s depois, no timeout do contexto, com mensagem genérica.
+					//
+					// Exceção: se já estávamos conectados a OUTRA rede, o NetworkManager primeiro
+					// desativa essa rede anterior (old_state ACTIVATED -> new_state DISCONNECTED)
+					// antes mesmo de começar a tentar ativar a rede alvo. Esse teardown esperado não
+					// pode ser confundido com uma falha da nova tentativa de conexão.
+					if newState <= nmStateDisconnected {
+						oldState, _ := sig.Body[1].(uint32)
+						if oldState == nmStateActivated {
+							continue
+						}
 						return fmt.Errorf("falha na autenticação ou estabelecimento da conexão Wi-Fi (estado NetworkManager: %d)", newState)
 					}
 				}
