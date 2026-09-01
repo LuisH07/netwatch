@@ -321,8 +321,11 @@ func (m *NMManager) Connect(ctx context.Context, ssid string, password string) e
 				return fmt.Errorf("falha ao atualizar credenciais salvas: %w", err)
 			}
 		}
-		// Ativa perfil existente reutilizando o ObjectPath descoberto
-		if err := nmObj.Call("org.freedesktop.NetworkManager.ActivateConnection", 0, savedConnPath, m.wifiDevice, dbus.ObjectPath("/")).Store(); err != nil {
+		// Ativa perfil existente reutilizando o ObjectPath descoberto. ActivateConnection
+		// retorna um parâmetro de saída (o path da conexão ativa) — Store() precisa de um
+		// destino para ele, senão falha com "length mismatch" antes mesmo de tentar ativar.
+		var activatedConn dbus.ObjectPath
+		if err := nmObj.Call("org.freedesktop.NetworkManager.ActivateConnection", 0, savedConnPath, m.wifiDevice, dbus.ObjectPath("/")).Store(&activatedConn); err != nil {
 			return fmt.Errorf("falha ao ativar conexão existente: %w", err)
 		}
 	} else {

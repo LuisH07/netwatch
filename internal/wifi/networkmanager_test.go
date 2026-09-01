@@ -395,7 +395,7 @@ func TestConnect_KnownProfile_ActivatesExisting(t *testing.T) {
 	}
 	conn.put(newFakeBusObject(savedConnPath).
 		withCall("org.freedesktop.NetworkManager.Settings.Connection.GetSettings", nil, settings))
-	conn.objects[nmPath].withCall("org.freedesktop.NetworkManager.ActivateConnection", nil)
+	conn.objects[nmPath].withCall("org.freedesktop.NetworkManager.ActivateConnection", nil, dbus.ObjectPath("/active/known"))
 	sendStateChangedWhenReady(conn, nmStateActivated)
 
 	m, err := newNMManager(conn)
@@ -426,7 +426,7 @@ func TestConnect_KnownProfile_UpdatesPasswordWhenProvided(t *testing.T) {
 		withCall("org.freedesktop.NetworkManager.Settings.Connection.GetSettings", nil, settings).
 		withCall("org.freedesktop.NetworkManager.Settings.Connection.Update", nil)
 	conn.put(savedConnObj)
-	conn.objects[nmPath].withCall("org.freedesktop.NetworkManager.ActivateConnection", nil)
+	conn.objects[nmPath].withCall("org.freedesktop.NetworkManager.ActivateConnection", nil, dbus.ObjectPath("/active/known"))
 	sendStateChangedWhenReady(conn, nmStateActivated)
 
 	m, err := newNMManager(conn)
