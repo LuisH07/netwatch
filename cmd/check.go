@@ -70,9 +70,19 @@ var checkCmd = &cobra.Command{
 			fmt.Println()
 			return &exitError{code: 2} // 2 = erro de execução/configuração
 		}
+		hasNetError := false
+
 		checkLine(true, "Nome", iface.Name)
-		// Como GetDefaultInterface já filtra por FlagUp, a interface ativa é garantidamente UP.
-		checkLine(true, "Estado", "UP")
+		// GetDefaultInterface apenas reporta o estado do flag UP do kernel, sem filtrar por ele —
+		// uma rota padrão pode, em casos raros (entrada de rota obsoleta, corrida durante a queda
+		// da interface), apontar para uma interface que já está down.
+		stateLabel := "DOWN"
+		if iface.Up {
+			stateLabel = "UP"
+		} else {
+			hasNetError = true
+		}
+		checkLine(iface.Up, "Estado", stateLabel)
 		checkLine(true, "Endereço IPv4", iface.IPv4.String())
 		mac := iface.MAC
 		if mac == "" {
@@ -134,8 +144,6 @@ var checkCmd = &cobra.Command{
 		icmpRes := <-icmpChan
 		dnsRes := <-dnsChan
 		tcpRes := <-tcpChan
-
-		hasNetError := false
 
 		icmpLabel := fmt.Sprintf("ICMP (%s)", route.Gateway.String())
 		if icmpRes.err != nil {
