@@ -136,10 +136,10 @@ func (m *NMManager) findKnownConnection(ssid string) (dbus.ObjectPath, bool, err
 	return "", false, nil
 }
 
-// updateConnectionPassword sobrescreve a senha (PSK) de um perfil de conexão já salvo,
-// preservando o restante de suas configurações. Necessário para que reativar um perfil
-// conhecido respeite uma senha nova digitada pelo usuário, em vez de sempre reusar a senha
-// antiga armazenada — caso contrário "wifi connect" nunca se recupera de uma senha trocada.
+// updateConnectionPassword sobrescreve a senha (PSK) de um perfil de conexão já salvo.
+// Necessário para que reativar um perfil conhecido respeite uma senha nova digitada pelo
+// usuário, em vez de sempre reusar a senha antiga armazenada — caso contrário "wifi connect"
+// nunca se recupera de uma senha trocada.
 func (m *NMManager) updateConnectionPassword(connPath dbus.ObjectPath, password string) error {
 	connObj := m.conn.Object(nmBusName, connPath)
 
@@ -148,13 +148,27 @@ func (m *NMManager) updateConnectionPassword(connPath dbus.ObjectPath, password 
 		return fmt.Errorf("falha ao ler configurações salvas: %w", err)
 	}
 
-	if settings["802-11-wireless-security"] == nil {
-		settings["802-11-wireless-security"] = map[string]dbus.Variant{}
+	// Reconstrói apenas as seções necessárias em vez de reenviar o blob inteiro devolvido
+	// por GetSettings: propriedades complexas (ex.: ipv6.addresses, do tipo D-Bus
+	// "a(ayuay)") perdem a assinatura de tipo original ao passar por dbus.Variant genérico
+	// no Go — reenviá-las via Update() faz o NetworkManager rejeitar a chamada com um erro
+	// como "can't set property of type 'a(ayuay)' from value of type 'aav'". As seções
+	// "connection" e "802-11-wireless" só têm propriedades escalares/arrays simples e podem
+	// ser repassadas com segurança; ipv4/ipv6 são reconstruídas do zero (mesma suposição de
+	// DHCP já usada ao criar um perfil novo em Connect(), acima) em vez de tentar preservar
+	// configuração estática de IP que o restante do código também não suporta.
+	update := map[string]map[string]dbus.Variant{
+		"connection":      settings["connection"],
+		"802-11-wireless": settings["802-11-wireless"],
+		"802-11-wireless-security": {
+			"key-mgmt": dbus.MakeVariant("wpa-psk"),
+			"psk":      dbus.MakeVariant(password),
+		},
+		"ipv4": {"method": dbus.MakeVariant("auto")},
+		"ipv6": {"method": dbus.MakeVariant("ignore")},
 	}
-	settings["802-11-wireless-security"]["key-mgmt"] = dbus.MakeVariant("wpa-psk")
-	settings["802-11-wireless-security"]["psk"] = dbus.MakeVariant(password)
 
-	return connObj.Call("org.freedesktop.NetworkManager.Settings.Connection.Update", 0, settings).Store()
+	return connObj.Call("org.freedesktop.NetworkManager.Settings.Connection.Update", 0, update).Store()
 }
 
 // isSecuredFromFlags reporta se um Access Point é protegido com base em suas flags WPA/RSN.

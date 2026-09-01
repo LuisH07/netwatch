@@ -455,6 +455,47 @@ func TestConnect_KnownProfile_UpdatesPasswordWhenProvided(t *testing.T) {
 	}
 }
 
+// TestUpdateConnectionPassword_DropsComplexSections é uma regressão de um bug real observado
+// em produção: passar de volta o blob inteiro devolvido por GetSettings (incluindo seções
+// como ipv6, cujas propriedades complexas — ex. "addresses" do tipo D-Bus "a(ayuay)" — perdem
+// a assinatura de tipo original ao passar por dbus.Variant genérico no Go) faz o
+// NetworkManager rejeitar a chamada Update com um erro como "can't set property of type
+// 'a(ayuay)' from value of type 'aav'". updateConnectionPassword deve reconstruir apenas as
+// seções necessárias, nunca repassar ipv4/ipv6/outras seções complexas de GetSettings.
+func TestUpdateConnectionPassword_DropsComplexSections(t *testing.T) {
+	const connPath = dbus.ObjectPath("/org/freedesktop/NetworkManager/Settings/9")
+	conn := newFakeConn()
+	settings := map[string]map[string]dbus.Variant{
+		"connection":      {"id": dbus.MakeVariant("RedeConhecida")},
+		"802-11-wireless": {"ssid": dbus.MakeVariant([]byte("RedeConhecida"))},
+		// Simula uma seção com propriedade complexa que, se repassada verbatim, causaria o
+		// erro real do NetworkManager descrito acima.
+		"ipv6": {"addresses": dbus.MakeVariant([]interface{}{})},
+	}
+	connObj := newFakeBusObject(connPath).
+		withCall("org.freedesktop.NetworkManager.Settings.Connection.GetSettings", nil, settings).
+		withCall("org.freedesktop.NetworkManager.Settings.Connection.Update", nil)
+	conn.put(connObj)
+
+	m := &NMManager{conn: conn}
+	if err := m.updateConnectionPassword(connPath, "senha-nova"); err != nil {
+		t.Fatalf("expected success, got error: %v", err)
+	}
+
+	args := connObj.callArgs["org.freedesktop.NetworkManager.Settings.Connection.Update"]
+	updated := args[0].(map[string]map[string]dbus.Variant)
+
+	if _, ok := updated["ipv6"]["addresses"]; ok {
+		t.Error("expected the complex ipv6.addresses property to NOT be passed through")
+	}
+	if _, ok := updated["ipv4"]; !ok {
+		t.Error("expected a freshly-constructed ipv4 section (method=auto)")
+	}
+	if _, ok := updated["connection"]; !ok {
+		t.Error("expected the (safe, scalar) connection section to be preserved")
+	}
+}
+
 // TestConnect_DisconnectedDuringAttemptIsFailure cobre o caso em que o NetworkManager volta
 // para "disconnected" (sem nunca emitir explicitamente NM_DEVICE_STATE_FAILED) após rejeitar
 // a conexão — antes tratado apenas pelo timeout de 15s do contexto, com mensagem genérica.
